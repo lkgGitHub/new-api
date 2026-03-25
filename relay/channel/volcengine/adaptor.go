@@ -2,14 +2,16 @@ package volcengine
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
-	"path/filepath"
 	"strings"
 
+	"github.com/QuantumNous/new-api/common"
 	channelconstant "github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/relay/channel"
@@ -86,7 +88,7 @@ func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInf
 	}
 
 	if len(request.Metadata) > 0 {
-		if err = json.Unmarshal(request.Metadata, &volcRequest); err != nil {
+		if err = common.Unmarshal(request.Metadata, &volcRequest); err != nil {
 			return nil, fmt.Errorf("error unmarshalling metadata to volcengine request: %w", err)
 		}
 	}
@@ -97,7 +99,7 @@ func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInf
 		info.IsStream = true
 	}
 
-	jsonData, err := json.Marshal(volcRequest)
+	jsonData, err := common.Marshal(volcRequest)
 	if err != nil {
 		return nil, fmt.Errorf("error marshalling volcengine request: %w", err)
 	}
@@ -109,128 +111,169 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 	switch info.RelayMode {
 	case constant.RelayModeImagesGenerations:
 		return request, nil
-	// 根据官方文档,并没有发现豆包生图支持表单请求:https://www.volcengine.com/docs/82379/1824121
-	//case constant.RelayModeImagesEdits:
-	//
-	//	var requestBody bytes.Buffer
-	//	writer := multipart.NewWriter(&requestBody)
-	//
-	//	writer.WriteField("model", request.Model)
-	//
-	//	formData := c.Request.PostForm
-	//	for key, values := range formData {
-	//		if key == "model" {
-	//			continue
-	//		}
-	//		for _, value := range values {
-	//			writer.WriteField(key, value)
-	//		}
-	//	}
-	//
-	//	if err := c.Request.ParseMultipartForm(32 << 20); err != nil {
-	//		return nil, errors.New("failed to parse multipart form")
-	//	}
-	//
-	//	if c.Request.MultipartForm != nil && c.Request.MultipartForm.File != nil {
-	//		var imageFiles []*multipart.FileHeader
-	//		var exists bool
-	//
-	//		if imageFiles, exists = c.Request.MultipartForm.File["image"]; !exists || len(imageFiles) == 0 {
-	//			if imageFiles, exists = c.Request.MultipartForm.File["image[]"]; !exists || len(imageFiles) == 0 {
-	//				foundArrayImages := false
-	//				for fieldName, files := range c.Request.MultipartForm.File {
-	//					if strings.HasPrefix(fieldName, "image[") && len(files) > 0 {
-	//						foundArrayImages = true
-	//						for _, file := range files {
-	//							imageFiles = append(imageFiles, file)
-	//						}
-	//					}
-	//				}
-	//
-	//				if !foundArrayImages && (len(imageFiles) == 0) {
-	//					return nil, errors.New("image is required")
-	//				}
-	//			}
-	//		}
-	//
-	//		for i, fileHeader := range imageFiles {
-	//			file, err := fileHeader.Open()
-	//			if err != nil {
-	//				return nil, fmt.Errorf("failed to open image file %d: %w", i, err)
-	//			}
-	//			defer file.Close()
-	//
-	//			fieldName := "image"
-	//			if len(imageFiles) > 1 {
-	//				fieldName = "image[]"
-	//			}
-	//
-	//			mimeType := detectImageMimeType(fileHeader.Filename)
-	//
-	//			h := make(textproto.MIMEHeader)
-	//			h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="%s"; filename="%s"`, fieldName, fileHeader.Filename))
-	//			h.Set("Content-Type", mimeType)
-	//
-	//			part, err := writer.CreatePart(h)
-	//			if err != nil {
-	//				return nil, fmt.Errorf("create form part failed for image %d: %w", i, err)
-	//			}
-	//
-	//			if _, err := io.Copy(part, file); err != nil {
-	//				return nil, fmt.Errorf("copy file failed for image %d: %w", i, err)
-	//			}
-	//		}
-	//
-	//		if maskFiles, exists := c.Request.MultipartForm.File["mask"]; exists && len(maskFiles) > 0 {
-	//			maskFile, err := maskFiles[0].Open()
-	//			if err != nil {
-	//				return nil, errors.New("failed to open mask file")
-	//			}
-	//			defer maskFile.Close()
-	//
-	//			mimeType := detectImageMimeType(maskFiles[0].Filename)
-	//
-	//			h := make(textproto.MIMEHeader)
-	//			h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="mask"; filename="%s"`, maskFiles[0].Filename))
-	//			h.Set("Content-Type", mimeType)
-	//
-	//			maskPart, err := writer.CreatePart(h)
-	//			if err != nil {
-	//				return nil, errors.New("create form file failed for mask")
-	//			}
-	//
-	//			if _, err := io.Copy(maskPart, maskFile); err != nil {
-	//				return nil, errors.New("copy mask file failed")
-	//			}
-	//		}
-	//	} else {
-	//		return nil, errors.New("no multipart form data found")
-	//	}
-	//
-	//	writer.Close()
-	//	c.Request.Header.Set("Content-Type", writer.FormDataContentType())
-	//	return bytes.NewReader(requestBody.Bytes()), nil
+	case constant.RelayModeImagesEdits:
+		return a.convertImageEditRequest(c, request)
 
 	default:
 		return request, nil
 	}
 }
 
-func detectImageMimeType(filename string) string {
-	ext := strings.ToLower(filepath.Ext(filename))
-	switch ext {
-	case ".jpg", ".jpeg":
-		return "image/jpeg"
-	case ".png":
-		return "image/png"
-	case ".webp":
-		return "image/webp"
-	default:
-		if strings.HasPrefix(ext, ".jp") {
-			return "image/jpeg"
-		}
-		return "image/png"
+func (a *Adaptor) convertImageEditRequest(c *gin.Context, request dto.ImageRequest) (any, error) {
+	if !strings.Contains(c.Request.Header.Get("Content-Type"), "multipart/form-data") {
+		return request, nil
 	}
+
+	mf := c.Request.MultipartForm
+	if mf == nil {
+		if _, err := c.MultipartForm(); err != nil {
+			return nil, fmt.Errorf("failed to parse image edit form request: %w", err)
+		}
+		mf = c.Request.MultipartForm
+	}
+	if mf == nil {
+		return nil, errors.New("no multipart form data found")
+	}
+
+	payload := make(map[string]any)
+	appendImageRequestFields(payload, request)
+	appendFormValues(payload, mf.Value)
+
+	imageFiles := collectMultipartFiles(mf, "image")
+	if len(imageFiles) == 0 {
+		return nil, errors.New("image is required")
+	}
+
+	imageValue, err := fileHeadersToImageValue(imageFiles)
+	if err != nil {
+		return nil, err
+	}
+	payload["image"] = imageValue
+
+	maskFiles := collectMultipartFiles(mf, "mask")
+	if len(maskFiles) > 0 {
+		maskValue, err := fileHeadersToImageValue(maskFiles[:1])
+		if err != nil {
+			return nil, fmt.Errorf("failed to read mask file: %w", err)
+		}
+		payload["mask"] = maskValue
+	}
+
+	return payload, nil
+}
+
+func appendImageRequestFields(payload map[string]any, request dto.ImageRequest) {
+	if request.Model != "" {
+		payload["model"] = request.Model
+	}
+	if request.Prompt != "" {
+		payload["prompt"] = request.Prompt
+	}
+	if request.N != nil {
+		payload["n"] = *request.N
+	}
+	if request.Size != "" {
+		payload["size"] = request.Size
+	}
+	if request.Quality != "" {
+		payload["quality"] = request.Quality
+	}
+	if request.ResponseFormat != "" {
+		payload["response_format"] = request.ResponseFormat
+	}
+	if request.Watermark != nil {
+		payload["watermark"] = *request.Watermark
+	}
+
+	appendRawJSONField(payload, "style", request.Style)
+	appendRawJSONField(payload, "user", request.User)
+	appendRawJSONField(payload, "extra_fields", request.ExtraFields)
+	appendRawJSONField(payload, "background", request.Background)
+	appendRawJSONField(payload, "moderation", request.Moderation)
+	appendRawJSONField(payload, "output_format", request.OutputFormat)
+	appendRawJSONField(payload, "output_compression", request.OutputCompression)
+	appendRawJSONField(payload, "partial_images", request.PartialImages)
+	appendRawJSONField(payload, "watermark_enabled", request.WatermarkEnabled)
+	appendRawJSONField(payload, "user_id", request.UserId)
+}
+
+func appendRawJSONField(payload map[string]any, key string, raw []byte) {
+	if len(raw) == 0 {
+		return
+	}
+
+	var value any
+	if err := common.Unmarshal(raw, &value); err != nil {
+		return
+	}
+	payload[key] = value
+}
+
+func appendFormValues(payload map[string]any, values map[string][]string) {
+	for key, items := range values {
+		if len(items) == 0 {
+			continue
+		}
+		switch key {
+		case "image", "image[]", "mask", "model", "prompt", "n", "size", "quality", "response_format", "watermark":
+			continue
+		}
+		if len(items) == 1 {
+			payload[key] = items[0]
+			continue
+		}
+		payload[key] = items
+	}
+}
+
+func collectMultipartFiles(mf *multipart.Form, field string) []*multipart.FileHeader {
+	if mf == nil || mf.File == nil {
+		return nil
+	}
+
+	var files []*multipart.FileHeader
+	for fieldName, headers := range mf.File {
+		if fieldName == field || fieldName == field+"[]" || strings.HasPrefix(fieldName, field+"[") {
+			files = append(files, headers...)
+		}
+	}
+	return files
+}
+
+func fileHeadersToImageValue(fileHeaders []*multipart.FileHeader) (any, error) {
+	imageValues := make([]string, 0, len(fileHeaders))
+	for _, fileHeader := range fileHeaders {
+		dataURL, err := fileHeaderToDataURL(fileHeader)
+		if err != nil {
+			return nil, err
+		}
+		imageValues = append(imageValues, dataURL)
+	}
+
+	if len(imageValues) == 1 {
+		return imageValues[0], nil
+	}
+	return imageValues, nil
+}
+
+func fileHeaderToDataURL(fileHeader *multipart.FileHeader) (string, error) {
+	file, err := fileHeader.Open()
+	if err != nil {
+		return "", fmt.Errorf("failed to open image file %q: %w", fileHeader.Filename, err)
+	}
+	defer file.Close()
+
+	fileBytes, err := io.ReadAll(file)
+	if err != nil {
+		return "", fmt.Errorf("failed to read image file %q: %w", fileHeader.Filename, err)
+	}
+	if len(fileBytes) == 0 {
+		return "", fmt.Errorf("image file %q is empty", fileHeader.Filename)
+	}
+
+	mimeType := http.DetectContentType(fileBytes)
+	base64Data := base64.StdEncoding.EncodeToString(fileBytes)
+	return fmt.Sprintf("data:%s;base64,%s", mimeType, base64Data), nil
 }
 
 func (a *Adaptor) Init(info *relaycommon.RelayInfo) {
